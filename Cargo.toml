@@ -1,0 +1,39 @@
+[package]
+name = "pattern-emit"
+description = "RE2 patterns as search tables: compile builds each into a sparse DFA, a program that only searches links just the search."
+version = "0.6.2"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/nodeve-com/pattern-emit"
+include = ["src", "README.md", "LICENSE"]
+# One test binary, not one per file: tests/all.rs.
+autotests = false
+
+[workspace]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+struct_excessive_bools = "deny"
+fn_params_excessive_bools = "deny"
+
+[features]
+# The compile side: parse, guard, and build a table. Off in a program that only searches.
+build = ["dep:regex-syntax", "regex-automata/std", "regex-automata/syntax", "regex-automata/dfa-build"]
+
+[dependencies]
+regex-automata = { version = "0.4.18", default-features = false, features = ["dfa-search"] }
+regex-syntax = { version = "0.8.11", optional = true }
+# A table checked once and kept, without std: `Once` alone.
+spin = { version = "0.9", default-features = false, features = ["once"] }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+# Its own compile side, so a plain `cargo test` checks the guard against Go's answers.
+pattern-emit = { path = ".", features = ["build"] }
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
