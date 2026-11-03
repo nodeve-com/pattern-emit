@@ -113,6 +113,54 @@ impl Guard<'_> {
             ),
         }
     }
+
+    fn assertion(&mut self, a: &ast::Assertion) -> Result<(), Refusal> {
+        match a.kind {
+            AssertionKind::StartLine
+            | AssertionKind::EndLine
+            | AssertionKind::StartText
+            | AssertionKind::EndText => Ok(()),
+            AssertionKind::WordBoundary | AssertionKind::NotWordBoundary => {
+                self.edits.push(boundary(a));
+                Ok(())
+            }
+            _ => refuse(
+                "`\\<`, `\\>`, `\\b{…}`: RE2 reads them as escaped literals, regex-syntax as \
+                 word boundaries",
+            ),
+        }
+    }
+
+    /// Checks a repeat against Go's budget: a nested count may multiply into at most `MAX_REPEAT`.
+    fn repetition(&mut self, r: &ast::Repetition) -> Result<(), Refusal> {
+        if matches!(*r.ast, Ast::Repetition(_)) {
+            return refuse("nested repetition (`a**`, `a{2}{3}`): RE2 rejects stacked operators");
+        }
+        let left = self.repeats.last().copied().unwrap_or(0);
+        let Some(n) = repeat_count(&r.op.kind) else {
+            self.repeats.push(left);
+            return Ok(());
+        };
+        if n > left {
+            return refuse(format!(
+                "repeat count {n} past RE2's limit of {MAX_REPEAT}, for nested counts their product"
+            ));
+        }
+        self.repeats.push(left.checked_div(n).unwrap_or(left));
+        Ok(())
+    }
+}
+
+/// The count a `{n}`, `{n,}`, or `{n,m}` repetition takes, or `None` for `*`, `+`, and `?`.
+fn repeat_count(kind: &RepetitionKind) -> Option<u32> {
+    match kind {
+        RepetitionKind::Range(
+            RepetitionRange::Exactly(n)
+            | RepetitionRange::AtLeast(n)
+            | RepetitionRange::Bounded(_, n),
+        ) => Some(*n),
+        _ => None,
+    }
 }
 
 /// Whether the class at `span` sits beside a `-` that could make it a range endpoint.
@@ -179,49 +227,10 @@ impl Visitor for Guard<'_> {
                 ) => refuse("`\\u` and `\\U` escapes: RE2 has none; write `\\x{…}`"),
                 _ => Ok(()),
             },
-            Ast::Assertion(a) => match a.kind {
-                AssertionKind::StartLine
-                | AssertionKind::EndLine
-                | AssertionKind::StartText
-                | AssertionKind::EndText => Ok(()),
-                AssertionKind::WordBoundary | AssertionKind::NotWordBoundary => {
-                    self.edits.push(boundary(a));
-                    Ok(())
-                }
-                _ => refuse(
-                    "`\\<`, `\\>`, `\\b{…}`: RE2 reads them as escaped literals, regex-syntax as \
-                     word boundaries",
-                ),
-            },
+            Ast::Assertion(a) => self.assertion(a),
             Ast::ClassUnicode(c) => self.unicode(c),
             Ast::ClassPerl(c) => self.perl(c, false),
-            Ast::Repetition(r) => {
-                if matches!(*r.ast, Ast::Repetition(_)) {
-                    return refuse(
-                        "nested repetition (`a**`, `a{2}{3}`): RE2 rejects stacked operators",
-                    );
-                }
-                let count = match r.op.kind {
-                    RepetitionKind::Range(RepetitionRange::Exactly(n))
-                    | RepetitionKind::Range(RepetitionRange::AtLeast(n))
-                    | RepetitionKind::Range(RepetitionRange::Bounded(_, n)) => Some(n),
-                    _ => None,
-                };
-                let left = self.repeats.last().copied().unwrap_or(0);
-                match count {
-                    Some(n) if n > left => refuse(format!(
-                        "repeat count {n} past RE2's limit of {MAX_REPEAT}, for nested counts their product"
-                    )),
-                    Some(n) => {
-                        self.repeats.push(left.checked_div(n).unwrap_or(left));
-                        Ok(())
-                    }
-                    None => {
-                        self.repeats.push(left);
-                        Ok(())
-                    }
-                }
-            }
+            Ast::Repetition(r) => self.repetition(r),
             _ => Ok(()),
         }
     }

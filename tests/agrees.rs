@@ -10,10 +10,11 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use pattern_emit::{build, build_ecma, Pattern, Refusal};
-use std::fmt::Write;
+
+type Builder = fn(&str) -> Result<Vec<u8>, Refusal>;
 
 /// Replays one engine's recorded answers (`key` per pattern) against `builder`.
-fn replay(file: &str, key: &str, list: &str, builder: fn(&str) -> Result<Vec<u8>, Refusal>) {
+fn replay(file: &str, key: &str, list: &str, builder: Builder) {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture/");
     let fixture: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{dir}{file}")).unwrap()).unwrap();
@@ -26,30 +27,9 @@ fn replay(file: &str, key: &str, list: &str, builder: fn(&str) -> Result<Vec<u8>
     let mut listing = String::new();
     let mut bad = Vec::new();
     for entry in fixture["patterns"].as_array().unwrap() {
-        let pattern = entry["p"].as_str().unwrap();
-        let table = builder(pattern);
-        let Some(answers) = entry[key].as_str() else {
-            if table.is_ok() {
-                bad.push(format!("{pattern:?}: the engine rejects it, build accepts"));
-            }
-            continue;
-        };
-        match table {
-            Err(why) => {
-                writeln!(listing, "refuse\t{pattern:?}\t{why}").unwrap();
-                continue;
-            }
-            Ok(bytes) => {
-                let p = Pattern::new(Box::leak(bytes.into_boxed_slice()));
-                for (i, input) in inputs.iter().enumerate() {
-                    let want = answers.as_bytes().get(i) == Some(&b'1');
-                    if p.is_match(input) != Ok(want) {
-                        bad.push(format!("{pattern:?} on {input:?}: the engine says {want}"));
-                    }
-                }
-                writeln!(listing, "pass\t{pattern:?}").unwrap();
-            }
-        }
+        let (line, found) = judge(entry, key, builder, &inputs);
+        listing.extend(line);
+        bad.extend(found);
     }
     assert!(bad.is_empty(), "disagreements:\n{}", bad.join("\n"));
 
@@ -62,6 +42,40 @@ fn replay(file: &str, key: &str, list: &str, builder: fn(&str) -> Result<Vec<u8>
         listing,
         "{list} is stale; UPDATE=1"
     );
+}
+
+/// One fixture entry's listing line (none where the engine rejects the pattern and so does build),
+/// and the inputs where the build's table and the engine's recorded answers disagree.
+fn judge(
+    entry: &serde_json::Value,
+    key: &str,
+    builder: Builder,
+    inputs: &[&str],
+) -> (Option<String>, Vec<String>) {
+    let pattern = entry["p"].as_str().unwrap();
+    let table = builder(pattern);
+    let Some(answers) = entry[key].as_str() else {
+        let bad = match table {
+            Ok(_) => vec![format!("{pattern:?}: the engine rejects it, build accepts")],
+            Err(_) => Vec::new(),
+        };
+        return (None, bad);
+    };
+    let bytes = match table {
+        Ok(bytes) => bytes,
+        Err(why) => return (Some(format!("refuse\t{pattern:?}\t{why}\n")), Vec::new()),
+    };
+    let p = Pattern::new(Box::leak(bytes.into_boxed_slice()));
+    let bad = inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, input)| {
+            let want = answers.as_bytes().get(i) == Some(&b'1');
+            (p.is_match(input) != Ok(want))
+                .then(|| format!("{pattern:?} on {input:?}: the engine says {want}"))
+        })
+        .collect();
+    (Some(format!("pass\t{pattern:?}\n")), bad)
 }
 
 #[test]

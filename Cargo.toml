@@ -18,6 +18,7 @@ indexing_slicing = "deny"
 arithmetic_side_effects = "deny"
 struct_excessive_bools = "deny"
 fn_params_excessive_bools = "deny"
+too_many_lines = "warn"
 
 [features]
 # The compile side: parse, guard, and build a table. Off in a program that only searches.

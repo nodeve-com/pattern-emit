@@ -97,26 +97,9 @@ impl Guard<'_> {
 
     /// A literal as ECMA-262 in Unicode mode reads it.
     fn literal(&self, l: &Literal, in_class: bool) -> Result<(), Refusal> {
-        let c = l.c;
         match l.kind {
-            LiteralKind::Verbatim if !in_class && matches!(c, '{' | '}' | ']') => refuse(format!(
-                "a bare `{c}`: ECMA-262 in Unicode mode rejects it unescaped; regex-syntax reads \
-                 a literal"
-            )),
-            LiteralKind::Verbatim if in_class && c == ']' => refuse(
-                "`]` first in a bracket: ECMA-262 ends the class there (`[]` is empty), \
-                 regex-syntax reads a literal",
-            ),
-            LiteralKind::Verbatim => Ok(()),
-            LiteralKind::Meta | LiteralKind::Superfluous
-                if SYNTAX.contains(c) || (in_class && c == '-') =>
-            {
-                Ok(())
-            }
-            LiteralKind::Meta | LiteralKind::Superfluous => refuse(format!(
-                "escape `\\{c}`: ECMA-262 in Unicode mode escapes only syntax characters \
-                 (and `-` in a class)"
-            )),
+            LiteralKind::Verbatim => verbatim(l.c, in_class),
+            LiteralKind::Meta | LiteralKind::Superfluous => escape(l.c, in_class),
             LiteralKind::HexFixed(HexLiteralKind::X | HexLiteralKind::UnicodeShort)
             | LiteralKind::HexBrace(HexLiteralKind::UnicodeShort) => Ok(()),
             LiteralKind::HexBrace(HexLiteralKind::X) => {
@@ -126,16 +109,94 @@ impl Guard<'_> {
             | LiteralKind::HexBrace(HexLiteralKind::UnicodeLong) => {
                 refuse("`\\U`: ECMA-262 has `\\uHHHH` and `\\u{…}`")
             }
-            LiteralKind::Special(
-                SpecialLiteralKind::Tab
-                | SpecialLiteralKind::LineFeed
-                | SpecialLiteralKind::CarriageReturn
-                | SpecialLiteralKind::VerticalTab
-                | SpecialLiteralKind::FormFeed,
-            ) => Ok(()),
-            LiteralKind::Special(_) => refuse("`\\a`: ECMA-262 has no bell escape"),
+            LiteralKind::Special(ref kind) => special(kind),
             LiteralKind::Octal => refuse("octal escapes: ECMA-262 rejects them in Unicode mode"),
         }
+    }
+
+    /// A group: flags are refused, and a named group must be `(?<name>…)` with a unique name.
+    fn group(&mut self, g: &ast::Group) -> Result<(), Refusal> {
+        match &g.kind {
+            GroupKind::NonCapturing(f) => flags(f),
+            GroupKind::CaptureIndex(_) => Ok(()),
+            GroupKind::CaptureName {
+                starts_with_p,
+                name,
+            } => self.capture_name(*starts_with_p, &name.name),
+        }
+    }
+
+    fn capture_name(&mut self, starts_with_p: bool, name: &str) -> Result<(), Refusal> {
+        if starts_with_p {
+            return refuse("`(?P<name>…)`: ECMA-262 writes a named group `(?<name>…)`");
+        }
+        let plain = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit());
+        if !plain || self.names.iter().any(|n| n == name) {
+            return refuse("group name: only ASCII identifiers, each used once, are supported");
+        }
+        self.names.push(name.to_owned());
+        Ok(())
+    }
+
+    fn assertion(&mut self, a: &ast::Assertion) -> Result<(), Refusal> {
+        match a.kind {
+            AssertionKind::StartLine | AssertionKind::EndLine => Ok(()),
+            AssertionKind::WordBoundary | AssertionKind::NotWordBoundary => {
+                self.edits.push(boundary(a));
+                Ok(())
+            }
+            AssertionKind::StartText | AssertionKind::EndText => refuse(
+                "`\\A`, `\\z`: ECMA-262 has no such escape; `^` and `$` anchor the whole text",
+            ),
+            _ => refuse("`\\<`, `\\>`, `\\b{…}`: ECMA-262 rejects these escapes"),
+        }
+    }
+}
+
+/// A literal character outside a class, or inside one, that ECMA-262 reads only as written.
+fn verbatim(c: char, in_class: bool) -> Result<(), Refusal> {
+    if !in_class && matches!(c, '{' | '}' | ']') {
+        return refuse(format!(
+            "a bare `{c}`: ECMA-262 in Unicode mode rejects it unescaped; regex-syntax reads a literal"
+        ));
+    }
+    if in_class && c == ']' {
+        return refuse(
+            "`]` first in a bracket: ECMA-262 ends the class there (`[]` is empty), \
+             regex-syntax reads a literal",
+        );
+    }
+    Ok(())
+}
+
+/// A backslash before `c`: ECMA-262 escapes only syntax characters, and `-` in a class.
+fn escape(c: char, in_class: bool) -> Result<(), Refusal> {
+    if SYNTAX.contains(c) || (in_class && c == '-') {
+        return Ok(());
+    }
+    refuse(format!(
+        "escape `\\{c}`: ECMA-262 in Unicode mode escapes only syntax characters \
+         (and `-` in a class)"
+    ))
+}
+
+fn special(kind: &SpecialLiteralKind) -> Result<(), Refusal> {
+    match kind {
+        SpecialLiteralKind::Tab
+        | SpecialLiteralKind::LineFeed
+        | SpecialLiteralKind::CarriageReturn
+        | SpecialLiteralKind::VerticalTab
+        | SpecialLiteralKind::FormFeed => Ok(()),
+        _ => refuse("`\\a`: ECMA-262 has no bell escape"),
+    }
+}
+
+fn repetition(r: &ast::Repetition) -> Result<(), Refusal> {
+    match *r.ast {
+        Ast::Repetition(_) => refuse("nested repetition (`a**`, `a{2}{3}`): ECMA-262 rejects it"),
+        Ast::Assertion(_) => refuse("a repeated assertion (`^*`): ECMA-262 rejects it"),
+        _ => Ok(()),
     }
 }
 
@@ -155,54 +216,17 @@ impl Visitor for Guard<'_> {
     fn visit_pre(&mut self, ast: &Ast) -> Result<(), Refusal> {
         match ast {
             Ast::Literal(l) => self.literal(l, false),
-            Ast::Group(g) => match &g.kind {
-                GroupKind::NonCapturing(f) => flags(f),
-                GroupKind::CaptureIndex(_) => Ok(()),
-                GroupKind::CaptureName {
-                    starts_with_p,
-                    name,
-                } => {
-                    let plain = name
-                        .name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        && !name.name.starts_with(|c: char| c.is_ascii_digit());
-                    if *starts_with_p {
-                        refuse("`(?P<name>…)`: ECMA-262 writes a named group `(?<name>…)`")
-                    } else if !plain || self.names.contains(&name.name) {
-                        refuse("group name: only ASCII identifiers, each used once, are supported")
-                    } else {
-                        self.names.push(name.name.clone());
-                        Ok(())
-                    }
-                }
-            },
+            Ast::Group(g) => self.group(g),
             Ast::Dot(span) => {
                 self.edits
                     .push((**span, r"[^\n\r\x{2028}\x{2029}]".to_owned()));
                 Ok(())
             }
-            Ast::Assertion(a) => match a.kind {
-                AssertionKind::StartLine | AssertionKind::EndLine => Ok(()),
-                AssertionKind::WordBoundary | AssertionKind::NotWordBoundary => {
-                    self.edits.push(boundary(a));
-                    Ok(())
-                }
-                AssertionKind::StartText | AssertionKind::EndText => refuse(
-                    "`\\A`, `\\z`: ECMA-262 has no such escape; `^` and `$` anchor the whole text",
-                ),
-                _ => refuse("`\\<`, `\\>`, `\\b{…}`: ECMA-262 rejects these escapes"),
-            },
+            Ast::Assertion(a) => self.assertion(a),
             Ast::Flags(f) => flags(&f.flags),
             Ast::ClassUnicode(c) => self.unicode(c),
             Ast::ClassPerl(c) => self.perl(c, false),
-            Ast::Repetition(r) => match *r.ast {
-                Ast::Repetition(_) => {
-                    refuse("nested repetition (`a**`, `a{2}{3}`): ECMA-262 rejects it")
-                }
-                Ast::Assertion(_) => refuse("a repeated assertion (`^*`): ECMA-262 rejects it"),
-                _ => Ok(()),
-            },
+            Ast::Repetition(r) => repetition(r),
             _ => Ok(()),
         }
     }

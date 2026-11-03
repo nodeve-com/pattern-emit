@@ -1,3 +1,7 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-indexing-slicing-in-tests = true
+# Clippy counts `self` as a parameter, and counts the fn body, an impl, a braced match arm, and a closure as nesting levels.
+too-many-arguments-threshold = 4
+too-many-lines-threshold = 35
+excessive-nesting-threshold = 4
