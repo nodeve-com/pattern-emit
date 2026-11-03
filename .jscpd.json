@@ -1,0 +1,10 @@
+{
+  "path": ["src","tests"],
+  "format": ["rust"],
+  "ignore": ["**/target/**"],
+  "minTokens": 50,
+  "minLines": 5,
+  "mode": "mild",
+  "threshold": 0,
+  "gitignore": true
+}

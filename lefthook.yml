@@ -1,0 +1,31 @@
+# Git hooks via lefthook. Activate once per clone: `lefthook install`; run it again to refetch
+# the shared gate after nodeve changes. The shared gate is nodeve's: markdown and shell format,
+# lint, and prose, doc and file size budgets, and jscpd (scope in .jscpd.json). The jobs below
+# are this repo's own, the same checks CI runs.
+output:
+  - failure
+
+remotes:
+  - git_url: https://github.com/nodeve-com/nodeve
+    ref: main
+    configs:
+      - hooks/lefthook.yml
+
+# Rustfmt rewrites and restages before anything else reads the files.
+pre-commit:
+  piped: true
+  jobs:
+    - name: fmt
+      glob: '*.rs'
+      run: rustfmt --edition 2021 {staged_files}
+      stage_fixed: true
+    - name: guard-words
+      run: sh scripts/guard-words.sh
+
+# The whole workspace before anything leaves.
+pre-push:
+  jobs:
+    - name: clippy
+      run: cargo clippy --locked --all-targets -- -D warnings
+    - name: test
+      run: cargo test --locked --quiet
